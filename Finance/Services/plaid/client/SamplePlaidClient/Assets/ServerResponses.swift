@@ -9,11 +9,12 @@ import Foundation
 enum UserConnectionStatus: String, Codable {
     case connected
     case disconnected
+    case authenticated
 }
 
-struct UserStatusResponse: Codable {
-    let userStatus: UserConnectionStatus
+struct UserStatusResponse: Decodable {
     let userId: String
+    let userStatus: UserConnectionStatus
 }
 
  struct LinkTokenCreateResponse: Codable {
@@ -43,7 +44,7 @@ struct BankAccount: Codable {
         case accountType
         case accountMask
         case accountBalance
-        case accountTransactions = "transactions"
+        case accountTransactions = "accountTransactions"
     }
 }
  

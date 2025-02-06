@@ -47,17 +47,17 @@ class InitViewController: UIViewController {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = scene.windows.first else { return }
 
-        let homeView = HomeView(viewModel: UserStatusViewModel())
-        let homeViewController = UIHostingController(rootView: homeView)
+        let tabView = MainTabView()
+        let tabViewController = UIHostingController(rootView: tabView)
 
-        window.rootViewController = homeViewController
+        window.rootViewController = tabViewController
         window.makeKeyAndVisible()
     }
     @IBAction func connectToPlaidWasPressed(_ sender: Any) {
         userStatusViewModel.fetchUserStatus() // Fetch the latest status
         
-        let homeView = HomeView(viewModel: userStatusViewModel)
-        let hostingController = UIHostingController(rootView: homeView)
+        let mainTabView = MainTabView()  // Instantiate your main tab view
+        let hostingController = UIHostingController(rootView: mainTabView)
         
         hostingController.modalPresentationStyle = .fullScreen
         present(hostingController, animated: true, completion: nil)
@@ -70,27 +70,38 @@ class InitViewController: UIViewController {
             DispatchQueue.main.async {
                 switch result {
                 case .success(let serverResponse):
+                    print("Received userStatus from server: \(serverResponse.userStatus)")
                     self.userLabel.text = "Hello user \(serverResponse.userId)!"
                     self.userStatusViewModel.userId = serverResponse.userId
-                    self.userStatusViewModel.userStatus = serverResponse.userStatus == .connected ? "Connected to Bank" : "Disconnected"
 
                     switch serverResponse.userStatus {
                     case .connected:
+                        self.userStatusViewModel.userStatus = "Connected to Bank"
                         self.statusLabel.text = "You are connected to your bank via Plaid. Make a call!"
                         self.connectToPlaid.setTitle("Make a new connection", for: .normal)
                         self.simpleCallButton.isEnabled = true
                     case .disconnected:
+                        self.userStatusViewModel.userStatus = "Disconnected"
+                        self.statusLabel.text = "You should connect to a bank"
+                        self.connectToPlaid.setTitle("Connect", for: .normal)
+                        self.simpleCallButton.isEnabled = false
+                    default:
+                        self.userStatusViewModel.userStatus = "Disconnected"
                         self.statusLabel.text = "You should connect to a bank"
                         self.connectToPlaid.setTitle("Connect", for: .normal)
                         self.simpleCallButton.isEnabled = false
                     }
+
                     self.connectToPlaid.isEnabled = true
                 case .failure(let error):
-                    print(error)
+                    print("Error retrieving user info: \(error)")
                 }
             }
         }
     }
+
+
+
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)

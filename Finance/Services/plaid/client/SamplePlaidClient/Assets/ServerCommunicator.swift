@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import FirebaseAuth
 
 ///
 /// Just a helper class that simplifies some of the work involved in calling our server
@@ -21,6 +22,7 @@ class ServerCommunicator {
         case encodingError(String)
         case decodingError(String)
         case nilData
+        case authError(String)
 
         var localizedDescription: String {
             switch self {
@@ -28,7 +30,8 @@ class ServerCommunicator {
             case .networkError(let error): return "Network Error: \(error)"
             case .encodingError(let error): return "Encoding Error: \(error)"
             case .decodingError(let error): return "Decoding Error: \(error)"
-            case .nilData: return "Server return null data"
+            case .nilData: return "Server returned null data"
+            case .authError(let error): return "Authentication Error: \(error)"
             }
         }
 
@@ -36,7 +39,6 @@ class ServerCommunicator {
             return localizedDescription
         }
     }
-
 
     init(baseURL: String = "http://localhost:8000/") {
         self.baseURL = baseURL
@@ -48,8 +50,29 @@ class ServerCommunicator {
         params: [String: Any]? = nil,
         completion: @escaping (Result<T, ServerCommunicator.Error>) -> Void) {
 
+        // Ensure user is authenticated
+        guard let user = Auth.auth().currentUser else {
+            print("No authenticated user found.")
+            completion(.failure(.authError("No authenticated user.")))
+            return
+        }
+
+        // Retrieve Firebase authentication token
+        user.getIDToken { idToken, error in
+            if let error = error {
+                print("Error getting ID token: \(error.localizedDescription)")
+                completion(.failure(.authError("Failed to get Firebase ID token.")))
+                return
+            }
+
+            guard let idToken = idToken else {
+                print("Failed to retrieve ID token")
+                completion(.failure(.authError("ID token is nil.")))
+                return
+            }
+
             let path = path.hasPrefix("/") ? String(path.dropFirst()) : path
-            let urlString = baseURL + path
+            let urlString = self.baseURL + path
 
             guard let url = URL(string: urlString) else {
                 completion(.failure(ServerCommunicator.Error.invalidUrl(urlString)))
@@ -60,25 +83,21 @@ class ServerCommunicator {
             request.httpMethod = httpMethod.rawValue
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization") // 🔥 Attach Firebase token
 
-            switch httpMethod {
-            case .post where params != nil:
+            if httpMethod == .post, let params = params {
                 do {
-                    let jsonData = try JSONSerialization.data(withJSONObject: params!, options: [])
+                    let jsonData = try JSONSerialization.data(withJSONObject: params, options: [])
                     request.httpBody = jsonData
                 } catch {
                     completion(.failure(.encodingError("\(error)")))
                     return
                 }
-            default:
-                break
             }
 
             // Create the task
             let task = URLSession.shared.dataTask(with: request) { (data, _, error) in
-
                 DispatchQueue.main.async {
-
                     if let error = error {
                         completion(.failure(.networkError("\(error)")))
                         return
@@ -94,7 +113,6 @@ class ServerCommunicator {
                     do {
                         let object = try JSONDecoder().decode(T.self, from: data)
                         completion(.success(object))
-
                     } catch {
                         completion(.failure(.decodingError("\(error)")))
                     }
@@ -102,11 +120,12 @@ class ServerCommunicator {
             }
 
             task.resume()
+        }
     }
-    
-    struct DummyDecodable: Decodable { }
 
-    // Convenience method where we don't want to do anything yet with the result, beyond seeing what we get back from the server
+    struct DummyDecodable: Decodable {}
+
+    // Convenience method for API calls without needing a completion handler
     func callMyServer(
         path: String,
         httpMethod: HTTPMethod,
@@ -117,12 +136,10 @@ class ServerCommunicator {
         }
     }
 
-
     private let baseURL: String
 }
 
 extension Data {
-
     fileprivate func printJson() {
         do {
             let json = try JSONSerialization.jsonObject(with: self, options: [])

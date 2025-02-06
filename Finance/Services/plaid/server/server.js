@@ -2,8 +2,10 @@
 require("dotenv").config();
 const express = require("express");
 const bodyParser = require("body-parser");
+const admin = require("firebase-admin");
+const path = require("path");
 const { Configuration, PlaidEnvironments, PlaidApi } = require("plaid");
-const { getUserRecord, updateUserRecord } = require("./user_utils");
+const { updateUserRecord } = require("./user_utils");
 const {
   FIELD_ACCESS_TOKEN,
   FIELD_USER_ID,
@@ -11,18 +13,25 @@ const {
   FIELD_ITEM_ID,
 } = require("./constants");
 
-const APP_PORT = process.env.APP_PORT || 8000;
+// Initialize Firebase Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(path.join(__dirname, "serviceAccountKey.json")),
+});
 
+
+
+// Express App Configuration
+const APP_PORT = process.env.APP_PORT || 8000;
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 app.use(express.static("public"));
 
 const server = app.listen(APP_PORT, function () {
-  console.log(`Server is up and running at http://localhost:${APP_PORT}/`);
+  console.log(`Server is running at http://localhost:${APP_PORT}/`);
 });
 
-
+// Plaid API Configuration
 const plaidConfig = new Configuration({
   basePath: PlaidEnvironments[process.env.PLAID_ENV],
   baseOptions: {
@@ -33,31 +42,51 @@ const plaidConfig = new Configuration({
     },
   },
 });
-
 const plaidClient = new PlaidApi(plaidConfig);
 
+async function authenticate(req, res, next) {
+  const idToken = req.headers.authorization?.split("Bearer ")[1];
 
-app.get("/server/get_user_info", async (req, res, next) => {
-  try {
-    const currentUser = await getUserRecord();
-    console.log("currentUser", currentUser);
-    res.json({
-      userId: currentUser["userId"],
-      userStatus: currentUser["userStatus"],
-    });
-  } catch (error) {
-    next(error);
+  if (!idToken) {
+    return res.status(401).json({ error: "Unauthorized: No token provided" });
   }
+
+  try {
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    req.userId = decodedToken.uid; // Store user ID in request object
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: "Invalid authentication token" });
+  }
+}
+
+app.get("/server/get_user_info", authenticate, async (req, res) => {
+    try {
+        const userId = req.userId;
+        const userDoc = await admin.firestore().collection("users").doc(userId).get();
+
+        if (!userDoc.exists) {
+            return res.status(404).json({ error: "User not found" });
+        }
+
+        const userData = userDoc.data();
+        const isBankConnected = userData.access_token ? true : false;
+
+        res.json({
+            userId: userId,
+            userStatus: isBankConnected ? "connected" : "disconnected"
+        });
+    } catch (error) {
+        res.status(500).json({ error: "Error retrieving user info" });
+    }
 });
 
-/**
- * Generates a Link token to be used by the client.
- */
-app.post("/server/generate_link_token", async (req, res, next) => {
-  try {
 
-    const currentUser = await getUserRecord();
-    const userId = currentUser[FIELD_USER_ID];
+
+app.post("/server/generate_link_token", authenticate, async (req, res, next) => {
+  try {
+    const userId = req.userId;
+
     const createTokenResponse = await plaidClient.linkTokenCreate({
       user: {
         client_user_id: userId,
@@ -67,127 +96,122 @@ app.post("/server/generate_link_token", async (req, res, next) => {
       country_codes: ["US"],
       language: "en",
       products: ["auth", "transactions"],
-      webhook: "https://sample-webhook-uri.com"
+      webhook: "https://sample-webhook-uri.com",
     });
-    const data = createTokenResponse.data;
-    console.log("createTokenResponse", data);
-    
 
-    
-    res.json({ expiration: data.expiration, linkToken: data.link_token });
+    res.json({
+      expiration: createTokenResponse.data.expiration,
+      linkToken: createTokenResponse.data.link_token,
+    });
   } catch (error) {
-    console.log(
-      "Running into an error! Note that if you have an error when creating a " +
-        "link token, it's frequently because you have the wrong client_id " +
-        "or secret for the environment, or you forgot to copy over your " +
-        ".env.template file to.env."
-    );
+    console.error("Error generating Plaid link token:", error);
     next(error);
   }
 });
 
-/**
- * Swap the public token for an access token, so we can access account info
- * in the future
- */
-app.post("/server/swap_public_token", async (req, res, next) => {
+// 🔹 Swap Public Token for Access Token (Unique Per User)
+app.post("/server/swap_public_token", authenticate, async (req, res, next) => {
   try {
+    const userId = req.userId;
 
     const result = await plaidClient.itemPublicTokenExchange({
       public_token: req.body.public_token,
     });
-    const data = result.data;
-    console.log("publicTokenExchange data", data);
-    
 
-    
-    const updateData = {};
-    updateData[FIELD_ACCESS_TOKEN] = data.access_token;
-    updateData[FIELD_ITEM_ID] = data.item_id;
-    updateData[FIELD_USER_STATUS] = "connected";
-    await updateUserRecord(updateData);
-    console.log("publicTokenExchange data", data);
-    res.json({ success: true });
+    const accessToken = result.data.access_token;
+    const itemId = result.data.item_id;
 
-  } catch (error) {
-    next(error);
-  }
-});
-
-
-app.get("/server/simple_auth", async (req, res, next) => {
-  try {
-    // Get the current user and their Plaid access token
-    const currentUser = await getUserRecord();
-    const accessToken = currentUser[FIELD_ACCESS_TOKEN];
-
-    // Fetch account details from Plaid
-    const authResponse = await plaidClient.authGet({
-      access_token: accessToken,
-    });
-
-    console.dir(authResponse.data, { depth: null });
-
-    // Extract institution name
-    const institutionName = authResponse.data.item.institution_name || "Unknown Bank";
-
-    // Extract all accounts
-    const accounts = authResponse.data.accounts;
-
-    // Prepare an array to hold all account data
-    const bankAccounts = [];
-
-    // Fetch transactions for each account
-    for (const account of accounts) {
-      const accountId = account.account_id;
-      const accountMask = account.mask;
-      const accountName = account.name;
-      const accountType = account.subtype;
-      const accountBalance = account.balances.current;
-
-      // Fetch last 10 transactions for this account
-      const transactionsResponse = await plaidClient.transactionsGet({
+    // Store Access Token for This Specific User in Firestore
+    const userRef = admin.firestore().collection("users").doc(userId);
+    await userRef.set(
+      {
         access_token: accessToken,
-        start_date: "2024-01-01",
-        end_date: new Date().toISOString().split("T")[0], // Today's date
-        options: {
-          account_ids: [accountId],
-          count: 10, // Fetch last 10 transactions
-        },
-      });
+        item_id: itemId,
+        user_status: "connected",
+      },
+      { merge: true }
+    );
 
-      const transactions = transactionsResponse.data.transactions.map((tx) => tx.name);
-
-      // Store the account info in the array
-      bankAccounts.push({
-        institutionName,
-        accountMask,
-        accountName,
-        accountType,
-        accountBalance,
-        transactions,
-      });
-    }
-
-    // Send all accounts' data back to iOS
-    res.json({ bankAccounts });
+    res.json({ success: true });
   } catch (error) {
-    console.error("Error fetching Plaid data:", error);
     next(error);
   }
 });
 
+app.get("/server/simple_auth", authenticate, async (req, res, next) => {
+    try {
+        const userId = req.userId;
+        const userDoc = await admin.firestore().collection("users").doc(userId).get();
 
-const errorHandler = function (err, req, res, next) {
-  console.error(`Your error:`);
-  console.error(err);
-  if (err.response?.data != null) {
-    res.status(500).send(err.response.data);
-  } else {
-    res.status(500).send({
-      error_code: "OTHER_ERROR",
-      error_message: "I got some other message on the server.",
-    });
-  }
-};
-app.use(errorHandler);
+        if (!userDoc.exists || !userDoc.data().access_token) {
+            return res.status(400).json({ error: "User has no linked Plaid account." });
+        }
+
+        const accessToken = userDoc.data().access_token;
+
+        // Fetch accounts from Plaid
+        const authResponse = await plaidClient.authGet({ access_token: accessToken });
+
+        const institutionName = authResponse.data.item.institution_name || "Unknown Bank";
+        const accounts = authResponse.data.accounts;
+
+        // Fetch last 30 days of transactions
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - 30);
+        const endDate = new Date();
+        const formattedStartDate = startDate.toISOString().split("T")[0];
+        const formattedEndDate = endDate.toISOString().split("T")[0];
+
+        const transactionsResponse = await plaidClient.transactionsGet({
+            access_token: accessToken,
+            start_date: formattedStartDate,
+            end_date: formattedEndDate,
+            options: { count: 10 }
+        });
+
+        const transactionsData = transactionsResponse.data.transactions;
+
+        // Map transactions to accounts and store under `accountTransactions`
+        const bankAccounts = accounts.map(account => {
+            const accountId = account.account_id;
+
+            // Filter transactions for the specific account
+            const filteredTransactions = transactionsData
+                .filter(tx => tx.account_id === accountId)
+                .map(tx => tx.name); // Only store transaction names
+
+            console.log(`Account ${account.name} Transactions:`, filteredTransactions); // ✅ Debugging output
+
+            return {
+                institutionName,
+                accountMask: account.mask,
+                accountName: account.name,
+                accountType: account.subtype,
+                accountBalance: account.balances.current,
+                accountTransactions: filteredTransactions || [] // ✅ Store transactions correctly
+            };
+        });
+
+        await admin.firestore().collection("users").doc(userId).set(
+          {
+            bankAccounts: bankAccounts // ✅ Ensure it is stored properly under "bankAccounts"
+          },
+          { merge: true }
+        );
+
+
+        res.json({ bankAccounts });
+    } catch (error) {
+        console.error("Error fetching Plaid transactions:", error);
+        next(error);
+    }
+});
+
+
+
+
+app.use((err, req, res, next) => {
+  console.error("Server error:", err);
+  res.status(500).json({ error: "Internal Server Error" });
+});
+

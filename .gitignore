@@ -1,3 +1,4 @@
 .env
 user_files/
 GoogleService-Info.plist
+serviceAccountKey.json

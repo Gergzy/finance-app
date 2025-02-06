@@ -7,6 +7,7 @@
 
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct LoginView: View {
     @State private var email: String = ""
@@ -49,6 +50,15 @@ struct LoginView: View {
                 .foregroundColor(.white)
                 .cornerRadius(10)
                 .padding(.horizontal, 20)
+
+                // Register Button for New Users
+                NavigationLink(destination: RegisterView()) {
+                    Text("Don't have an account? Register here")
+                        .foregroundColor(.blue)
+                        .underline()
+                }
+                .padding(.top, 10)
+
             }
             .padding()
             .fullScreenCover(isPresented: $isLoggedIn) {
@@ -62,11 +72,32 @@ struct LoginView: View {
             if let error = error {
                 errorMessage = error.localizedDescription
                 isLoggedIn = false
-            } else {
+            } else if let user = result?.user {
+                let uid = user.uid // Retrieve the unique Firebase UID
+                print("User logged in with UID: \(uid)")
+
+                // Fetch additional user details from Firestore (optional)
+                fetchUserDetails(uid: uid)
+
                 userStatusViewModel.fetchUserStatus()
                 isLoggedIn = true
             }
         }
     }
+
+    private func fetchUserDetails(uid: String) {
+        let db = Firestore.firestore()
+        let userRef = db.collection("users").document(uid)
+
+        userRef.getDocument { document, error in
+            if let document = document, document.exists {
+                let userData = document.data()
+                print("User data retrieved: \(String(describing: userData))")
+            } else {
+                print("No user data found, creating a new user entry if needed.")
+            }
+        }
+    }
 }
+
 
